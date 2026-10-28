@@ -1,179 +1,268 @@
+import os
 import sqlite3
-import logging
-import re
-from telegram import Update
+from datetime import datetime
+from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    ContextTypes,
-    filters
+    ConversationHandler,
+    filters,
+    ContextTypes
 )
 
-# Sizning Admin ID raqamingiz
-ADMIN_ID = 7807649802 
-BOT_TOKEN = "9115969021:AAGHuVQ3kMxg_jRptAChuKjOhAT2hudvYFE"
+TOKEN = os.getenv("9115969021:AAGHuVQ3kMxg_jRptAChuKjOhAT2hudvYFE")
+ADMIN_ID = 7807649802  # O'zingizning Telegram ID raqamingizni yozing
 
-# 1. Ma'lumotlar bazasi
-conn = sqlite3.connect('challenge.db', check_same_thread=False)
-cursor = conn.cursor()
+# Ro'yxatdan o'tish holati uchun bosqich
+GET_NAME = 1
 
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        full_name TEXT,
-        points INTEGER DEFAULT 0
-    )
-''')
-conn.commit()
+# --- BAZA BILAN ISHLASH QISMI ---
+def init_db():
+    conn = sqlite3.connect('challenge.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            full_name TEXT,
+            points INTEGER DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-logging.basicConfig(level=logging.INFO)
+def get_user(user_id):
+    conn = sqlite3.connect('challenge.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT full_name, points FROM users WHERE user_id = ?', (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    return user
 
-# 2. /start buyrug'i
+def register_user(user_id, full_name):
+    conn = sqlite3.connect('challenge.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO users (user_id, full_name, points) VALUES (?, ?, COALESCE((SELECT points FROM users WHERE user_id = ?), 0))', 
+                   (user_id, full_name, user_id))
+    conn.commit()
+    conn.close()
+
+def add_points(user_id, earned_points):
+    conn = sqlite3.connect('challenge.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT points FROM users WHERE user_id = ?', (user_id,))
+    user = cursor.fetchone()
+    
+    if user:
+        new_points = user[0] + earned_points
+        cursor.execute('UPDATE users SET points = ? WHERE user_id = ?', (new_points, user_id))
+    else:
+        new_points = earned_points
+    conn.commit()
+    conn.close()
+    return new_points
+
+def get_leaderboard():
+    conn = sqlite3.connect('challenge.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT full_name, points FROM users ORDER BY points DESC LIMIT 10')
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+# /start buyrug'i va ro'yxatdan o'tishni boshlash
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+    user_id = update.effective_user.id
+    user = get_user(user_id)
     
-    if user.id == ADMIN_ID:
-        await update.message.reply_text(
-            "Assalomu alaykum, Xonim! 👑 Bot boshqaruvchisi sifatida tayyorsiz.\n\n"
-            "Barcha ishtirokchilarning umumiy bazasini ko'rish uchun quyidagi buyruqni yuboring:\n"
-            "👉 /admin"
+    if user:
+        # Agar oldindan ro'yxatdan o'tgan bo'lsa
+        full_name = user[0]
+        text = (
+            f"Salom, <b>{full_name}</b>!\n\n"
+            "🏆 <b>21 kunlik Challenge botiga xush kelibsiz!</b>\n"
+            "Vazifalaringizni rasm va tegishli heshteg bilan yuboring:\n"
+            "• <b>#tong</b> (03:00 - 06:00) — 10 ball\n"
+            "• <b>#kardio</b> (07:00 gacha) — 20 ball\n"
+            "• <b>#dars [soat]</b> (23:59 gacha) — Har bir soat uchun 10 ball\n"
+            "• <b>#tahlil</b> (23:59 gacha) — 20 ball\n\n"
+            "📊 O'z ballaringizni ko'rish uchun /reyting buyrug'ini yuboring."
         )
-        return
-
-    cursor.execute('SELECT full_name FROM users WHERE user_id = ?', (user.id,))
-    result = cursor.fetchone()
-    
-    if result and result[0]:
+        await update.message.reply_text(text, parse_mode="HTML")
+        return ConversationHandler.END
+    else:
+        # Ro'yxatdan o'tmagan bo'lsa, ism-familiya so'raymiz
         await update.message.reply_text(
-            f"Salom, {result[0]}! Siz allaqachon ro'yxatdan o'tgansiz. ✅\n\n"
-            "Vazifalaringizni hashtaglar orqali yuborishingiz mumkin:\n"
-            "• #tong — 10 ball\n"
-            "• #kardio — 20 ball\n"
-            "• #dars [soat] — 10 ball/soat\n"
-            "• #tahlil — 20 ball\n\n"
-            "/statistika — Shaxsiy ballingiz"
+            "🏆 <b>21 kunlik Challenge botiga xush kelibsiz!</b>\n\n"
+            "Ishtirok etish uchun iltimos, **Ism va Familiyangizni** kiriting (masalan: <i>Azizbek Rahimov</i>):",
+            parse_mode="HTML"
         )
-    else:
-        await update.message.reply_text(
-            "Assalomu alaykum! 21 kunlik Challenge botiga xush kelibsiz. 🏆\n\n"
-            "Iltimos, ro'yxatdan o'tish uchun **Ism va Familiyangizni** yuboring (Masalan: *Aziza Qudratova*):",
-            parse_mode="Markdown"
-        )
+        return GET_NAME
 
-# 3. /admin buyrug'i
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Kechirasiz, bu buyruq faqat bot boshqaruvchisi uchun!")
+# Ism-familiyani qabul qilib saqlash
+async def save_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    full_name = update.message.text.strip()
+    
+    if len(full_name) < 3:
+        await update.message.reply_text("⚠️ Iltimos, haqiqiy Ism va Familiyangizni to'liq kiriting:")
+        return GET_NAME
+
+    register_user(user_id, full_name)
+    
+    await update.message.reply_text(
+        f"✅ Rahmat, <b>{full_name}</b>! Siz muvaffaqiyatli ro'yxatdan o'tdingiz.\n\n"
+        "Endi har kuni vazifalaringizni rasm va heshteg bilan yuborishingiz mumkin:\n"
+        "• <b>#tong</b> (03:00 - 06:00) — 10 ball\n"
+        "• <b>#kardio</b> (07:00 gacha) — 20 ball\n"
+        "• <b>#dars [soat]</b> (23:59 gacha) — Har bir soat uchun 10 ball\n"
+        "• <b>#tahlil</b> (23:59 gacha) — 20 ball\n\n"
+        "Reytingni ko'rish uchun /reyting buyrug'idan foydalaning.",
+        parse_mode="HTML"
+    )
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Jarayon bekor qilindi. Qaytadan boshlash uchun /start bosing.")
+    return ConversationHandler.END
+
+# /help buyrug'i
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "<b>📌 Challenge qoidalari va vaqtlari:</b>\n\n"
+        "1. <b>#tong</b>: 03:00 - 06:00 (+10 ball)\n"
+        "2. <b>#kardio</b>: 07:00 gacha (+20 ball)\n"
+        "3. <b>#dars [soat]</b>: 23:59 gacha (Masalan: <i>#dars 2</i> — 2 soat uchun 20 ball)\n"
+        "4. <b>#tahlil</b>: 23:59 gacha (+20 ball)\n\n"
+        "📊 /reyting - Ishtirokchilar reytingini ko'rish"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+# /reyting buyrug'i
+async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    leaders = get_leaderboard()
+    if not leaders:
+        await update.message.reply_text("Hozircha reytingda ishtirokchilar yo'q.")
         return
     
-    cursor.execute('SELECT full_name, username, points FROM users ORDER BY points DESC')
-    all_users = cursor.fetchall()
+    text = "🏆 <b>Top Ishtirokchilar Reytingi:</b>\n\n"
+    for index, (full_name, points) in enumerate(leaders, start=1):
+        text += f"{index}. {full_name} — <b>{points} ball</b>\n"
     
-    text = "👑 **ADMIN BAZASI: BARCHA ISHTIROKCHILAR** 👑\n\n"
-    if not all_users:
-        text += "Hozircha bazada ro'yxatdan o'tgan ishtirokchilar yo'q."
-    else:
-        for idx, (name, uname, pts) in enumerate(all_users, start=1):
-            username_str = f"(@{uname})" if uname else ""
-            text += f"{idx}. **{name or 'Noma\'lum'}** {username_str} — 🏆 **{pts or 0} ball**\n"
+    await update.message.reply_text(text, parse_mode="HTML")
 
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# 4. /statistika buyrug'i
-async def statistika(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id == ADMIN_ID:
-        await update.message.reply_text("Siz bot boshqaruvchisisiz. Ishtirokchilar bazasini ko'rish uchun /admin buyrug'ini yuboring.")
-        return
-
-    cursor.execute('SELECT full_name, points FROM users WHERE user_id = ?', (user.id,))
-    result = cursor.fetchone()
-    
-    if result and result[0]:
-        name, points = result
-        await update.message.reply_text(f"👤 Ism: {name}\n🏆 To'plagan ballingiz: {points} ball")
-    else:
-        await update.message.reply_text("Siz hali ro'yxatdan o'tmagansiz. /start buyrug'ini bosing.")
-
-# 5. Xabarlar va hashtaglar orqali ball hisoblash
+# Xabarlar va vazifalarni qabul qilish
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text or ""
+    user_id = update.effective_user.id
+    user = get_user(user_id)
     
-    if user.id == ADMIN_ID:
-        await update.message.reply_text("Buyruqlardan foydalaning. Masalan: /admin")
+    if not user:
+        await update.message.reply_text("⚠️ Avval ro'yxatdan o'tishingiz kerak! Iltimos, /start buyrug'ini yuboring.")
         return
 
-    cursor.execute('SELECT full_name, points FROM users WHERE user_id = ?', (user.id,))
-    user_row = cursor.fetchone()
+    full_name = user[0]
+    message = update.message
+    caption = message.caption or message.text or ""
+    caption_lower = caption.lower()
     
-    if not user_row or not user_row[0]:
-        full_name = text.strip()
-        if len(full_name) < 3:
-            await update.message.reply_text("⚠️ Iltimos, to'liq Ism va Familiyangizni kiriting:")
+    now = datetime.now()
+    current_hour = now.hour
+    current_minute = now.minute
+    total_minutes = current_hour * 60 + current_minute
+
+    points = 0
+    task_name = ""
+
+    # 1. #tong (03:00 - 06:00) -> 10 ball
+    if "#tong" in caption_lower:
+        task_name = "#tong"
+        if 180 <= total_minutes <= 360:
+            points = 10
+        else:
+            await message.reply_text("❌ #tong vazifasi faqat 03:00 dan 06:00 gacha qabul qilinadi!")
             return
-        
-        cursor.execute('''
-            INSERT INTO users (user_id, username, full_name, points)
-            VALUES (?, ?, ?, 0)
-            ON CONFLICT(user_id) DO UPDATE SET full_name = ?
-        ''', (user.id, user.username, full_name, full_name))
-        conn.commit()
-        
-        await update.message.reply_text(
-            f"✅ Rahmat, {full_name}! Muvaffaqiyatli ro'yxatdan o'tdingiz.\n\n"
-            "Vazifalaringizni hashtaglar orqali yuborishingiz mumkin!"
-        )
+
+    # 2. #kardio (07:00 gacha) -> 20 ball
+    elif "#kardio" in caption_lower:
+        task_name = "#kardio"
+        if total_minutes <= 420:
+            points = 20
+        else:
+            await message.reply_text("❌ #kardio vazifasi 07:00 dan keyin qabul qilinmaydi!")
+            return
+
+    # 3. #dars (23:59 gacha) -> Har bir soat uchun 10 ball
+    elif "#dars" in caption_lower:
+        task_name = "#dars"
+        if total_minutes <= 1439:
+            parts = caption_lower.split()
+            hours = 1
+            for i, p in enumerate(parts):
+                if "#dars" in p and i + 1 < len(parts):
+                    try:
+                        hours = int(parts[i+1])
+                    except ValueError:
+                        hours = 1
+            points = hours * 10
+        else:
+            await message.reply_text("❌ Vaqt tugadi! #dars 23:59 gacha qabul qilinadi.")
+            return
+
+    # 4. #tahlil (23:59 gacha) -> 20 ball
+    elif "#tahlil" in caption_lower:
+        task_name = "#tahlil"
+        if total_minutes <= 1439:
+            points = 20
+        else:
+            await message.reply_text("❌ Vaqt tugadi! #tahlil 23:59 gacha qabul qilinadi.")
+            return
+    else:
         return
 
-    current_points = user_row[1] or 0
-    added_points = 0
-    response_msg = ""
-    text_lower = text.lower()
-
-    if "#tong" in text_lower:
-        added_points += 10
-        response_msg += "☀️ #tong uchun +10 ball qo'shildi!\n"
-    
-    if "#kardio" in text_lower:
-        added_points += 20
-        response_msg += "❤️ #kardio uchun +20 ball qo'shildi!\n"
+    # Agar ball berilsa, bazaga yozamiz
+    if points > 0:
+        total_user_points = add_points(user_id, points)
         
-    if "#tahlil" in text_lower:
-        added_points += 20
-        response_msg += "📊 #tahlil uchun +20 ball qo'shildi!\n"
-
-    dars_match = re.search(r'#dars\s+(\d+)', text_lower)
-    if dars_match:
-        hours = int(dars_match.group(1))
-        dars_pts = hours * 10
-        added_points += dars_pts
-        response_msg += f"📚 #dars ({hours} soat) uchun +{dars_pts} ball qo'shildi!\n"
-
-    if added_points > 0:
-        new_total = current_points + added_points
-        cursor.execute('UPDATE users SET points = ? WHERE user_id = ?', (new_total, user.id))
-        conn.commit()
-        await update.message.reply_text(
-            f"✅ Hisobingiz yangilandi!\n\n{response_msg}\n🏆 Jami ballingiz: **{new_total} ball**",
-            parse_mode="Markdown"
+        await message.reply_text(
+            f"✅ Vazifangiz qabul qilindi, {full_name}!\n"
+            f"📌 {task_name} uchun +{points} ball qo'shildi.\n"
+            f"⭐ Jami ballingiz: {total_user_points}"
         )
-    else:
-        await update.message.reply_text("📝 Xabaringiz qabul qilindi! Ball olish uchun to'g'ri hashtag yuboring.")
+        
+        # Adminga yo'naltirish
+        if ADMIN_ID and ADMIN_ID != 123456789:
+            try:
+                user_info = f"👤 Ishtirokchi: {full_name}\n📌 Vazifa: {task_name} (+{points} ball)\n⭐ Jami: {total_user_points}"
+                await context.bot.send_message(chat_id=ADMIN_ID, text=f"📥 <b>Yangi vazifa!</b>\n\n{user_info}", parse_mode="HTML")
+                await message.forward(chat_id=ADMIN_ID)
+            except Exception as e:
+                print(f"Adminga yuborishda xatolik: {e}")
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    if not TOKEN:
+        print("Xatolik: TOKEN topilmadi!")
+        return
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CommandHandler("statistika", statistika))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    init_db()  # Ma'lumotlar bazasini yaratish
 
-    print("🚀 Bot ishga tushdi...")
-    app.run_polling()
+    application = ApplicationBuilder().token(TOKEN).build()
 
-if __name__ == '__main__':
+    # Ro'yxatdan o'tish dialogi uchun ConversationHandler
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            GET_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_name)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("reyting", leaderboard_command))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
+
+    print("Bot to'liq tayyor va ishga tushdi...")
+    application.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
     main()
