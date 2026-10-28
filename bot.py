@@ -141,7 +141,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "#kardio" in text_lower:
         added_points += 20
         response_msg += "❤️ #kardio uchun +20 ball qo'shildi!\n"
-        +
+        
     if "#tahlil" in text_lower:
         added_points += 20
         response_msg += "📊 #tahlil uchun +20 ball qo'shildi!\n"
